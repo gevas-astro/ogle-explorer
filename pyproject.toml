@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ogle-explorer"
+version = "0.1.0"
+description = "Interactive period search for OGLE light curves: Lomb-Scargle, aliases, red-noise significance and bootstrap errors (teaching tool)"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Georgios Vasilopoulos" }]
+keywords = ["astronomy", "time series", "periodogram", "Lomb-Scargle", "OGLE", "X-ray binaries"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Education",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "astropy>=5.0",
+    "matplotlib>=3.6",
+    "PySide6>=6.4",
+    "pyqtgraph>=0.13",
+]
+
+[project.scripts]
+ogle-explorer = "ogle_explorer.qt:main"        # Qt interface (recommended)
+ogle-explorer-mpl = "ogle_explorer.mpl:main"   # matplotlib-widgets interface (fallback)
+
+[tool.setuptools.packages.find]
+where = ["src"]

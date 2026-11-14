@@ -1,7 +1,6 @@
 # OGLE explorer
 
-Interactive period search for OGLE light curves, written for the time-series week of the MSc course
-*Observational Astrophysics* (Department of Physics, National and Kapodistrian University of Athens).
+Interactive period search for OGLE light curves, but should work with any ascii data file having a similar structure (time, mag, error).
 The worked example is the orbital period of the Be/X-ray binary RX J0520.5−6932 in the LMC.
 
 ![screenshot](docs/screenshot.png)

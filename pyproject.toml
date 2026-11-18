@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ogle-explorer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Interactive period search for OGLE light curves: Lomb-Scargle, aliases, red-noise significance and bootstrap errors (teaching tool)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -24,6 +24,9 @@ dependencies = [
     "PySide6>=6.4",
     "pyqtgraph>=0.13",
 ]
+
+[project.optional-dependencies]
+fast = ["Toeplitz-LS>=1.0.0rc1"]               # optional fast periodogram engine (Krutkowski 2026)
 
 [project.scripts]
 ogle-explorer = "ogle_explorer.qt:main"        # Qt interface (recommended)

@@ -41,7 +41,10 @@ from astropy.table import Table
 
 from . import tools as ot
 from .core import (load, running_median, robust_sigma, folded_template, night_id, season_id, parse_exclude,
-                   to_norm, beta_sf, beta_isf, SIDEREAL, NORMS, SIGS, FAPS, RESULT_COLS)
+                   to_norm, beta_sf, beta_isf, ls_power, HAVE_TOEPLITZ, ENGINES,
+                   SIDEREAL, NORMS, SIGS, FAPS, RESULT_COLS)
+
+RESULT_COLS = RESULT_COLS + ["engine", "ls_time_ms"]
 
 pg.setConfigOptions(background="w", foreground="k", antialias=False)
 
@@ -60,7 +63,8 @@ class Cancelled(Exception):
 class Core:
     """All numerics, as plain functions of a settings dict and the cached analysis. `job` (optional) is the
     background Job, used for progress reports and cancellation."""
-    MAXF = 40000
+    MAXF = 300_000            # cap on trial frequencies (5x oversampling up to here); the same for both engines,
+                              # so switching engine changes only the speed, never the grid or the numbers
 
     @staticmethod
     def _report(job, i, n, msg):
@@ -83,18 +87,21 @@ class Core:
             t, r, e = t[k], r[k], e[k]
         pmin, pmax, K, pcut = s["pmin"], s["pmax"], s["K"], s["pcut"]
         T = np.ptp(t); N = t.size
+        eng = s["engine"]
         nf = int(min(self.MAXF, 5 * T * (1 / pmin - 1 / pmax)))
         f = np.linspace(1 / pmax, 1 / pmin, max(nf, 500))
-        self._report(job, 0, 0, f"Lomb-Scargle, K = {K}, {f.size} frequencies …")
-        ls = LombScargle(t, r, nterms=K)
-        p = ls.power(f)
+        self._report(job, 0, 0, f"Lomb-Scargle ({eng}), K = {K}, {f.size} frequencies …")
+        ls = LombScargle(t, r, nterms=K)               # kept for the model and the Baluev FAP
+        t_ls = time.perf_counter()
+        p = ls_power(t, r, f, K, eng)
+        t_ls = time.perf_counter() - t_ls
         search = np.ones(f.size, bool) if pcut is None else (1 / f >= pcut)
         if search.sum() < 10:
             raise ValueError(f"alias cut {pcut:g} d leaves no periods to search")
         ib = np.flatnonzero(search)[p[search].argmax()]; df = f[1] - f[0]
         ff = np.linspace(f[ib] - df, min(f[ib] + df, 1 / pcut if pcut else np.inf), 101)
-        pf = ls.power(ff)
-        c = dict(t=t, r=r, e=e, f=f, p=p, K=K, N=N, T=T, ls=ls, pmin=pmin, pmax=pmax, pcut=pcut,
+        pf = ls_power(t, r, ff, K, eng)
+        c = dict(engine=eng, t_ls=t_ls, t=t, r=r, e=e, f=f, p=p, K=K, N=N, T=T, ls=ls, pmin=pmin, pmax=pmax, pcut=pcut,
                  search=search, fs=f[search], fbest=float(ff[pf.argmax()]), pbest=float(pf.max()),
                  chi2ref=float(np.sum((r - r.mean()) ** 2)), settings=s)
         self._report(job, 0, 0, "local posterior …")
@@ -107,7 +114,7 @@ class Core:
         posterior width when N is large)."""
         T = c["T"]
         ff = np.linspace(c["fbest"] - 0.5 / T, c["fbest"] + 0.5 / T, 4001)
-        pl = c["ls"].power(ff)
+        pl = ls_power(c["t"], c["r"], ff, c["K"], c["engine"])
         L = to_norm(pl, "Bayes log-post", c["N"], c["K"], c["chi2ref"], pl.max())
         w = np.exp(L); w /= w.sum()
         fm = float((w * ff).sum()); sf = float(np.sqrt((w * (ff - fm) ** 2).sum()))
@@ -156,19 +163,18 @@ class Core:
             if s["detrend"]:
                 x = x - running_median(t, x, s["half"])
             x = (x - x.mean()) / x.std() * rms_red + rng.normal(0, sw, t.size)
-            maxp[i] = LombScargle(t, x, nterms=K).power(f).max()
+            maxp[i] = np.nanmax(ls_power(t, x, f, K, c["engine"]))
         return dict(alpha=alpha, how=how, rms_red=rms_red, sw=sw, nsim=nsim, maxp=maxp,
                     lev95=float(np.percentile(maxp, 95)), lev99=float(np.percentile(maxp, 99)),
                     pval=float((np.sum(maxp >= c["pbest"]) + 1) / (nsim + 1)))
 
     @staticmethod
     def _peak(c, t, r, f0):
-        K, T = c["K"], c["T"]
-        ls = LombScargle(t, r, nterms=K)
+        K, T, eng = c["K"], c["T"], c["engine"]
         ff = np.linspace(f0 - 3 / T, f0 + 3 / T, 241); ff = ff[ff > 0]
-        i = ls.power(ff).argmax(); d = ff[1] - ff[0]
+        i = np.nanargmax(ls_power(t, r, ff, K, eng)); d = ff[1] - ff[0]
         f2 = np.linspace(ff[i] - d, ff[i] + d, 41)
-        return 1 / f2[ls.power(f2).argmax()]
+        return 1 / f2[np.nanargmax(ls_power(t, r, f2, K, eng))]
 
     def sigma_P(self, c, kind, nboot, job=None, label=""):
         t, r, f0 = c["t"], c["r"], c["fbest"]
@@ -301,7 +307,7 @@ def line_edit(text="", width=None, tip=None, placeholder=None):
 
 class ExplorerQt(QtWidgets.QMainWindow):
     def __init__(self, path=None, pmin=10.0, pmax=60.0, porb=None, workdir=".", outdir="explorer_output",
-                 live=False, exclude="", alias=""):
+                 live=False, exclude="", alias="", engine="astropy"):
         super().__init__()
         self.core = Core()
         self.workdir, self.outdir = workdir, outdir
@@ -321,7 +327,7 @@ class ExplorerQt(QtWidgets.QMainWindow):
         self.setWindowTitle("OGLE explorer (Qt)")
         self.resize(1650, 1000)
         self._build_plots()
-        self._build_controls(pmin, pmax, porb, live, exclude, alias)
+        self._build_controls(pmin, pmax, porb, live, exclude, alias, engine)
         self._build_statusbar()
 
         self.live_timer = QtCore.QTimer(self, singleShot=True, interval=350)
@@ -387,7 +393,7 @@ class ExplorerQt(QtWidgets.QMainWindow):
         main.setStretchFactor(0, 1); main.setStretchFactor(1, 0)
         self.setCentralWidget(main)
 
-    def _build_controls(self, pmin, pmax, porb, live, exclude, alias):
+    def _build_controls(self, pmin, pmax, porb, live, exclude, alias, engine="astropy"):
         V = QtWidgets.QVBoxLayout(self.controls)
         V.setContentsMargins(6, 6, 6, 6)
 
@@ -432,6 +438,13 @@ class ExplorerQt(QtWidgets.QMainWindow):
         self.le_alias = line_edit(alias, 80, tip="periods below this are the alias region: shaded and not "
                                   "searched. Empty = off, 'auto' = 2 sidereal days, or a number [d]",
                                   placeholder="auto / d")
+        self.co_eng = QtWidgets.QComboBox(); self.co_eng.addItems(ENGINES)
+        if not HAVE_TOEPLITZ:
+            self.co_eng.model().item(1).setEnabled(False)
+            self.co_eng.setToolTip('Toeplitz-LS not installed:  pip install "ogle-explorer[fast]"')
+        else:
+            self.co_eng.setToolTip("same power, computed with NuFFTs + a Toeplitz solve (Krutkowski 2026)")
+        self.co_eng.setCurrentText(engine if (engine == "astropy" or HAVE_TOEPLITZ) else "astropy")
         self.co_norm = QtWidgets.QComboBox(); self.co_norm.addItems(NORMS)
         self.co_sig = QtWidgets.QComboBox(); self.co_sig.addItems(SIGS); self.co_sig.setCurrentText("Baluev")
         self.co_sig.setToolTip("analytic significance, valid for WHITE noise only")
@@ -442,9 +455,10 @@ class ExplorerQt(QtWidgets.QMainWindow):
         L.addWidget(QtWidgets.QLabel("Pmin [d]"), 1, 0); L.addWidget(self.le_pmin, 1, 1)
         L.addWidget(QtWidgets.QLabel("Pmax [d]"), 2, 0); L.addWidget(self.le_pmax, 2, 1)
         L.addWidget(QtWidgets.QLabel("alias P <"), 3, 0); L.addWidget(self.le_alias, 3, 1)
-        L.addWidget(QtWidgets.QLabel("normalisation"), 4, 0); L.addWidget(self.co_norm, 4, 1, 1, 2)
-        L.addWidget(QtWidgets.QLabel("analytic sig."), 5, 0); L.addWidget(self.co_sig, 5, 1, 1, 2)
-        L.addWidget(self.ck_win, 6, 0, 1, 2); L.addWidget(self.ck_winc, 7, 0, 1, 2)
+        L.addWidget(QtWidgets.QLabel("LS engine"), 4, 0); L.addWidget(self.co_eng, 4, 1, 1, 2)
+        L.addWidget(QtWidgets.QLabel("normalisation"), 5, 0); L.addWidget(self.co_norm, 5, 1, 1, 2)
+        L.addWidget(QtWidgets.QLabel("analytic sig."), 6, 0); L.addWidget(self.co_sig, 6, 1, 1, 2)
+        L.addWidget(self.ck_win, 7, 0, 1, 2); L.addWidget(self.ck_winc, 8, 0, 1, 2)
         V.addWidget(g)
 
         # --- update
@@ -495,6 +509,7 @@ class ExplorerQt(QtWidgets.QMainWindow):
         for w in (self.le_pmin, self.le_pmax, self.le_alias, self.le_orb, self.le_exc):
             w.editingFinished.connect(self._edit_finished)
         self.le_exc.editingFinished.connect(self.draw_exclusions)
+        self.co_eng.currentIndexChanged.connect(self.changed)
         self.co_norm.currentIndexChanged.connect(self.redraw)
         self.co_sig.currentIndexChanged.connect(self.redraw)
         self.ck_win.toggled.connect(self.ensure_windows)
@@ -569,7 +584,7 @@ class ExplorerQt(QtWidgets.QMainWindow):
         return dict(sel=self.sel, exclude=exc, exclude_txt=self.le_exc.text().strip(), detrend=det,
                     half=self.sp_det.value(), detrend_txt=f"median ±{self.sp_det.value():g} d" if det else "none",
                     orbit=porb if (self.ck_orb.isChecked() and porb) else None, clip=self.ck_clip.isChecked(),
-                    K=self.sp_K.value(), pmin=pmin, pmax=pmax, pcut=pcut)
+                    K=self.sp_K.value(), pmin=pmin, pmax=pmax, pcut=pcut, engine=self.co_eng.currentText())
 
     # ------------------------------------------------------------------ files and selection
     def refresh_file_list(self):
@@ -929,6 +944,7 @@ class ExplorerQt(QtWidgets.QMainWindow):
              f"T = {c['T']:.0f} d,  resolution P²/T = {Pb ** 2 / c['T']:.4g} d",
              f"detrend {s['detrend_txt']}, clip {'on' if s['clip'] else 'off'}"
              + (f", orbit {s['orbit']:g} d removed" if s["orbit"] else ""),
+             f"LS engine {c['engine']}: {c['f'].size} frequencies in {1e3 * c['t_ls']:.0f} ms",
              f"K = {c['K']},  norm = {norm},  P range {c['pmin']:g}–{c['pmax']:g} d"
              + (f", searched P ≥ {c['pcut']:.3g} d" if c["pcut"] else ""),
              f"best P = {Pb:.6g} d   (f = {c['fbest']:.6f} 1/d)",
@@ -964,7 +980,8 @@ class ExplorerQt(QtWidgets.QMainWindow):
                    P2_over_T=Pb ** 2 / c["T"], rms_mmag=1e3 * robust_sigma(r), P_fold=P, profile_pp_mmag=pp,
                    red_alpha=self.red["alpha"] if self.red else np.nan,
                    red_maxpow99=self.red["lev99"] if self.red else np.nan,
-                   red_pvalue=self.red["pval"] if self.red else np.nan)
+                   red_pvalue=self.red["pval"] if self.red else np.nan,
+                   engine=c["engine"], ls_time_ms=1e3 * c["t_ls"])
         return L, R, row
 
     def outdir_now(self):
@@ -1001,6 +1018,13 @@ class ExplorerQt(QtWidgets.QMainWindow):
         _, _, row = self.summary_text()
         csv_path = os.path.join(self.outdir_now(), "explorer_results.csv")
         new = not os.path.exists(csv_path)
+        if not new:                                     # file from an older version: rewrite it with the new columns
+            with open(csv_path, newline="") as fh:
+                rd = csv.DictReader(fh); old_cols = rd.fieldnames or []; old_rows = list(rd)
+            if old_cols != RESULT_COLS:
+                with open(csv_path, "w", newline="") as fh:
+                    w = csv.DictWriter(fh, fieldnames=RESULT_COLS, restval="", extrasaction="ignore")
+                    w.writeheader(); w.writerows(old_rows)
         with open(csv_path, "a", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=RESULT_COLS)
             if new:
@@ -1029,12 +1053,14 @@ def main(argv=None):
     ap.add_argument("--porb", type=float, default=None, help="orbital period for 'subtract orbit'")
     ap.add_argument("--exclude", default="", help='MJD intervals to drop, e.g. "56550-56800, 60300-60470"')
     ap.add_argument("--alias", default="", help="alias cut: periods below are shaded and not searched ('auto' = 2 d)")
+    ap.add_argument("--engine", choices=ENGINES, default="astropy",
+                    help='periodogram engine; Toeplitz needs: pip install "ogle-explorer[fast]"')
     ap.add_argument("--live", action="store_true", help="start with live update on")
     ap.add_argument("--outdir", default="explorer_output")
     a = ap.parse_args(argv)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     win = ExplorerQt(a.file, a.pmin, a.pmax, a.porb, workdir=a.dir, outdir=a.outdir, live=a.live,
-                     exclude=a.exclude, alias=a.alias)
+                     exclude=a.exclude, alias=a.alias, engine=a.engine)
     win.show()
     return app.exec()
 

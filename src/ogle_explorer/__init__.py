@@ -12,4 +12,4 @@ try:
     from importlib.metadata import version as _version
     __version__ = _version("ogle-explorer")
 except Exception:                                   # running from a source checkout without installing
-    __version__ = "0.1.0"
+    __version__ = "0.2.0"

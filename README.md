@@ -15,6 +15,7 @@ The tool covers what usually goes wrong in a period search:
 * **period uncertainty**: point, night and season bootstraps, season jackknife, the analytic white-noise
   formula, and the Bayesian posterior width, all side by side
 * **output**: each panel as a PNG, plus one row per analysis appended to a CSV/ECSV results table
+* **two periodogram engines**: astropy (default) or the optional, much faster Toeplitz-LS (identical results)
 
 ## Install
 
@@ -32,6 +33,19 @@ pip install .            # add -e to edit the code in place
 ```
 
 pip installs all dependencies (numpy, scipy, astropy, matplotlib, PySide6, pyqtgraph).
+
+**Optional fast engine.** To also install [Toeplitz-LS](https://github.com/kkrutkowski/Toeplitz-LS)
+(Krutkowski 2026, arXiv:2611.20300), use the `[fast]` extra:
+
+```bash
+pip install "ogle-explorer[fast] @ git+https://github.com/<user>/ogle-explorer.git"
+pip install ".[fast]"                                    # from a downloaded copy
+```
+
+Toeplitz-LS computes the same Lomb–Scargle power as astropy, much faster: for RX J0520, about 25× faster with one
+harmonic and about 170× faster with three (69 000 frequencies: 191 ms → 8 ms for K = 1, 4.2 s → 25 ms for K = 3).
+Choose it under **LS engine** in the window, or with `--engine Toeplitz`. astropy stays the default. Both engines
+use the same frequency grid, so they give the same periods, powers and significance levels.
 
 ## Getting the data
 

@@ -105,3 +105,35 @@ def beta_isf(q, K, N):
     if K == 1:
         return 1 - np.asarray(q) ** (1 / b)
     return np.full(np.shape(q), np.nan)
+
+
+# ------------------------------------------------------------------ periodogram engines
+# Optional fast engine: Toeplitz-LS (pip install "ogle-explorer[fast]"), Krutkowski 2026, arXiv:2611.20300.
+# It computes the same multi-harmonic, floating-mean LS power as astropy (standard normalisation) on a uniform
+# frequency grid, using NuFFTs and a Toeplitz solve per frequency: ~10x faster for K = 1, ~100x for K = 2-3.
+try:
+    from toeplitz_ls import tls as _tls
+    HAVE_TOEPLITZ = True
+except Exception:                                   # not installed, or no wheel for this platform
+    _tls = None
+    HAVE_TOEPLITZ = False
+
+ENGINES = ["astropy", "Toeplitz"]
+
+
+def ls_power(t, y, f, nterms=1, engine="astropy"):
+    """Standard-normalised (R^2) Lomb-Scargle power with K = nterms harmonics and a floating mean.
+    engine='Toeplitz' needs toeplitz_ls and a uniform grid; otherwise (or for unstable bins, returned as NaN by
+    Toeplitz-LS) astropy is used, so the result is always complete."""
+    from astropy.timeseries import LombScargle
+    f = np.asarray(f, float)
+    if engine == "Toeplitz" and HAVE_TOEPLITZ and f.size > 2:
+        df = (f[-1] - f[0]) / (f.size - 1)
+        if df > 0 and np.allclose(np.diff(f), df, rtol=1e-6, atol=0):
+            p = np.asarray(_tls.power(f.size, df, f[0], np.asarray(t, float), np.asarray(y, float),
+                                      nterms=int(nterms), normalization="standard"), float)
+            bad = ~np.isfinite(p)
+            if bad.any():                           # ill-conditioned bins: fill them with the astropy value
+                p[bad] = LombScargle(t, y, nterms=nterms).power(f[bad])
+            return p
+    return LombScargle(t, y, nterms=nterms).power(f)
